@@ -12,7 +12,5 @@ else()
 endif()
 
 include(GNUInstallDirs)
-include(cmake/UbitrackConfig)
-
 
 add_subdirectory(src)

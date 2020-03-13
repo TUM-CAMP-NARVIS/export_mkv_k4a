@@ -13,6 +13,8 @@
 
 #include <Corrade/configure.h>
 #include <Corrade/Utility/Arguments.h>
+#include <Corrade/Utility/Debug.h>
+#include <Corrade/Utility/DebugStl.h>
 #include <Corrade/Utility/Directory.h>
 #include <Corrade/Containers/ArrayView.h>
 

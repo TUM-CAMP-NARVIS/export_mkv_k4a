@@ -12,10 +12,11 @@ set_property(TARGET extract_mkv_k4a PROPERTY CXX_STANDARD 11)
 set_target_properties(extract_mkv_k4a PROPERTIES LINKER_LANGUAGE CXX)
 
 target_link_libraries(extract_mkv_k4a PRIVATE
+        CONAN_PKG::opencv
         CONAN_PKG::magnum
         CONAN_PKG::corrade
-        CONAN_PKG::opencv
         CONAN_PKG::kinect-azure-sensor-sdk
+        CONAN_PKG::bzip2
         )
 
 target_include_directories(extract_mkv_k4a PUBLIC

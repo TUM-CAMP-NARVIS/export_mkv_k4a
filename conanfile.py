@@ -15,17 +15,18 @@ class ExportMKVConan(ConanFile):
 
     short_paths = True
     settings = "os", "compiler", "build_type", "arch"
-    generators = "cmake", "ubitrack_virtualenv_generator"
+    generators = "cmake", "virtualrunenv"
 
     requires = (
-        "magnum/2019.01@camposs/stable",
-        "corrade/2019.01@camposs/stable",
-        "magnum-integration/2019.01@camposs/stable",
         "opencv/3.4.8@camposs/stable",
+        "magnum/2019.10@camposs/stable",
+        "corrade/2019.10@camposs/stable",
         "kinect-azure-sensor-sdk/1.3.0@camposs/stable",
+        "bzip2/1.0.6@camposs/stable",
          )
 
     default_options = {
+        "opencv:shared": True,
         "magnum:with_anyimageimporter": True,
         "magnum:with_tgaimporter": True,
         "magnum:with_anysceneimporter": True,
@@ -39,9 +40,6 @@ class ExportMKVConan(ConanFile):
         "magnum:with_windowlesseglapplication": False,
         "magnum:target_gles": False,
         "magnum:with_opengltester": True,
-        "magnum-integration:with_bullet": False,  # does not build on windows debug for the moment ...
-        "magnum-integration:with_imgui": True,
-        "magnum-integration:with_eigen": True,
     }
 
     # all sources are deployed with the package
