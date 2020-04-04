@@ -127,6 +127,7 @@ namespace Magnum {
         size_t m_first_frame{0};
         size_t m_last_frame{0};
 
+        bool m_export_timestamp{false};
         bool m_export_color{false};
         bool m_export_depth{false};
         bool m_export_infrared{false};
@@ -140,6 +141,7 @@ namespace Magnum {
                 .addOption("output-dir", "../test_data").setHelp("output-dir", "Output directory", "DIR")
                 .addOption("first-frame", "0").setHelp("first-frame", "First frame to export")
                 .addOption("last-frame", "0").setHelp("last-frame", "Last frame to export")
+                .addBooleanOption("timestamp").setHelp("timestamp", "Export Timestamps to file")
                 .addBooleanOption("color").setHelp("color", "Export Color stream")
                 .addBooleanOption("depth").setHelp("depth", "Export Depth stream")
                 .addBooleanOption("infrared").setHelp("infrared", "Export Infrared stream")
@@ -154,6 +156,7 @@ namespace Magnum {
         m_first_frame = args.value<Magnum::Int>("first-frame");
         m_last_frame = args.value<Magnum::Int>("last-frame");
 
+        m_export_timestamp = args.isSet("timestamp");
         m_export_color = args.isSet("color");
         m_export_depth = args.isSet("depth");
         m_export_infrared = args.isSet("infrared");
@@ -174,8 +177,8 @@ namespace Magnum {
             return 1;
         }
 
-        if (!m_export_infrared && !m_export_color && !m_export_depth && !m_export_pointcloud) {
-            Magnum::Error{} << "No stream was selected for export";
+        if (!m_export_timestamp && !m_export_infrared && !m_export_color && !m_export_depth && !m_export_pointcloud) {
+            Magnum::Error{} << "Error: No stream was selected for export!";
             Magnum::Debug{} << args.help();
             return 1;
         }
@@ -249,6 +252,12 @@ namespace Magnum {
         k4a::capture capture;
         size_t frame_counter{0};
 
+        std::string timestamp_path = Corrade::Utility::Directory::join(m_output_directory, "timestamp.csv");
+
+        if (m_export_timestamp) {
+            Corrade::Utility::Directory::writeString(timestamp_path, "frameindex,depth_dts,depth_sts,color_dts,color_sts,infrared_dts,infrared_sts\n");
+        }
+
         for (;;) {
             try {
                 if (m_dev.get_next_capture(&capture)) {
@@ -261,96 +270,129 @@ namespace Magnum {
                         break;
                     }
 
+                    std::ostringstream tsss;
+                    // record frameindex
+                    tsss << std::to_string(frame_counter) << ",";
+
                     Magnum::Debug{} << "Extract Frame: " << frame_counter;
-                    if (m_export_depth) {
+
+                    {
                         const k4a::image inputImage = capture.get_depth_image();
                         if (inputImage) {
-                            int w = inputImage.get_width_pixels();
-                            int h = inputImage.get_height_pixels();
+                            // record depth timestamp
+                            tsss << std::to_string(inputImage.get_device_timestamp().count()) << ",";
+                            tsss << std::to_string(inputImage.get_system_timestamp().count()) << ",";
 
-                            if (inputImage.get_format() == K4A_IMAGE_FORMAT_DEPTH16) {
-                                cv::Mat image_buffer = cv::Mat(cv::Size(w, h), CV_16UC1,
-                                                               const_cast<void *>(static_cast<const void *>(inputImage.get_buffer())),
-                                                               static_cast<size_t>(inputImage.get_stride_bytes()));
-                                uint64_t timestamp = inputImage.get_system_timestamp().count();
+                            if (m_export_depth) {
+                                int w = inputImage.get_width_pixels();
+                                int h = inputImage.get_height_pixels();
 
-                                std::ostringstream ss;
-                                ss << std::setw(10) << std::setfill('0') << frame_counter << "_depth.tiff";
-                                std::string image_path = Corrade::Utility::Directory::join(m_output_directory, ss.str());
-                                cv::imwrite(image_path, image_buffer);
+                                if (inputImage.get_format() == K4A_IMAGE_FORMAT_DEPTH16) {
+                                    cv::Mat image_buffer = cv::Mat(cv::Size(w, h), CV_16UC1,
+                                                                   const_cast<void *>(static_cast<const void *>(inputImage.get_buffer())),
+                                                                   static_cast<size_t>(inputImage.get_stride_bytes()));
+                                    uint64_t timestamp = inputImage.get_system_timestamp().count();
 
-                            } else {
-                                Magnum::Warning{} << "Received depth frame with unexpected format: "
-                                                  << inputImage.get_format();
-                                break;
+                                    std::ostringstream ss;
+                                    ss << std::setw(10) << std::setfill('0') << frame_counter << "_depth.tiff";
+                                    std::string image_path = Corrade::Utility::Directory::join(m_output_directory, ss.str());
+                                    cv::imwrite(image_path, image_buffer);
+
+                                } else {
+                                    Magnum::Warning{} << "Received depth frame with unexpected format: "
+                                                      << inputImage.get_format();
+                                    break;
+                                }
                             }
+                        } else {
+                            tsss << ",,";
                         }
                     }
 
-                    if (m_export_color) {
+                    {
                         const k4a::image inputImage = capture.get_color_image();
                         if (inputImage) {
-                            int w = inputImage.get_width_pixels();
-                            int h = inputImage.get_height_pixels();
+                            // record color timestamp
+                            tsss << std::to_string(inputImage.get_device_timestamp().count()) << ",";
+                            tsss << std::to_string(inputImage.get_system_timestamp().count()) << ",";
 
-                            cv::Mat image_buffer;
-                            uint64_t timestamp;
+                            if (m_export_color) {
+                                int w = inputImage.get_width_pixels();
+                                int h = inputImage.get_height_pixels();
 
-                            if (inputImage.get_format() == K4A_IMAGE_FORMAT_COLOR_BGRA32) {
-                                image_buffer = cv::Mat(cv::Size(w, h), CV_8UC4,
-                                                       const_cast<void *>(static_cast<const void *>(inputImage.get_buffer())),
-                                                       cv::Mat::AUTO_STEP);
-                                timestamp = inputImage.get_system_timestamp().count();
+                                cv::Mat image_buffer;
+                                uint64_t timestamp;
 
-                                std::vector<int> compression_params;
-                                compression_params.push_back(cv::IMWRITE_JPEG_QUALITY);
-                                compression_params.push_back(95);
+                                if (inputImage.get_format() == K4A_IMAGE_FORMAT_COLOR_BGRA32) {
+                                    image_buffer = cv::Mat(cv::Size(w, h), CV_8UC4,
+                                                           const_cast<void *>(static_cast<const void *>(inputImage.get_buffer())),
+                                                           cv::Mat::AUTO_STEP);
+                                    timestamp = inputImage.get_system_timestamp().count();
 
-                                std::ostringstream ss;
-                                ss << std::setw(10) << std::setfill('0') << frame_counter << "_color.jpg";
-                                std::string image_path = Corrade::Utility::Directory::join(m_output_directory, ss.str());
-                                cv::imwrite(image_path, image_buffer, compression_params);
+                                    std::vector<int> compression_params;
+                                    compression_params.push_back(cv::IMWRITE_JPEG_QUALITY);
+                                    compression_params.push_back(95);
 
-                            } else if (inputImage.get_format() == K4A_IMAGE_FORMAT_COLOR_MJPG) {
-                                
-                                auto rawData = Corrade::Containers::ArrayView<uint8_t>(const_cast<uint8_t *>(inputImage.get_buffer()), inputImage.get_size());
-                                std::ostringstream ss;
-                                ss << std::setw(10) << std::setfill('0') << frame_counter << "_color.jpg";
-                                std::string image_path = Corrade::Utility::Directory::join(m_output_directory, ss.str());
-                                Corrade::Utility::Directory::write(image_path, rawData);
+                                    std::ostringstream ss;
+                                    ss << std::setw(10) << std::setfill('0') << frame_counter << "_color.jpg";
+                                    std::string image_path = Corrade::Utility::Directory::join(m_output_directory, ss.str());
+                                    cv::imwrite(image_path, image_buffer, compression_params);
 
-                            } else {
-                                Magnum::Warning{} << "Received color frame with unexpected format: "
-                                                  << inputImage.get_format();
-                                break;
+                                } else if (inputImage.get_format() == K4A_IMAGE_FORMAT_COLOR_MJPG) {
+
+                                    auto rawData = Corrade::Containers::ArrayView<uint8_t>(const_cast<uint8_t *>(inputImage.get_buffer()), inputImage.get_size());
+                                    std::ostringstream ss;
+                                    ss << std::setw(10) << std::setfill('0') << frame_counter << "_color.jpg";
+                                    std::string image_path = Corrade::Utility::Directory::join(m_output_directory, ss.str());
+                                    Corrade::Utility::Directory::write(image_path, rawData);
+
+                                } else {
+                                    Magnum::Warning{} << "Received color frame with unexpected format: "
+                                                      << inputImage.get_format();
+                                    break;
+                                }
+
                             }
-
+                        } else {
+                            tsss << ",,";
                         }
                     }
 
-                    if (m_export_infrared) {
+                    {
                         const k4a::image inputImage = capture.get_ir_image();
                         if (inputImage) {
-                            int w = inputImage.get_width_pixels();
-                            int h = inputImage.get_height_pixels();
+                            // record infrared timestamp
+                            tsss << std::to_string(inputImage.get_device_timestamp().count()) << ",";
+                            tsss << std::to_string(inputImage.get_system_timestamp().count()) << "\n";
 
-                            if (inputImage.get_format() == K4A_IMAGE_FORMAT_IR16) {
-                                cv::Mat image_buffer = cv::Mat(cv::Size(w, h), CV_16UC1,
-                                                               const_cast<void *>(static_cast<const void *>(inputImage.get_buffer())),
-                                                               static_cast<size_t>(inputImage.get_stride_bytes()));
-                                uint64_t timestamp = inputImage.get_system_timestamp().count();
+                            if (m_export_infrared) {
+                                int w = inputImage.get_width_pixels();
+                                int h = inputImage.get_height_pixels();
 
-                                std::ostringstream ss;
-                                ss << std::setw(10) << std::setfill('0') << frame_counter << "_ir.tiff";
-                                std::string image_path = Corrade::Utility::Directory::join(m_output_directory, ss.str());
-                                cv::imwrite(image_path, image_buffer);
+                                if (inputImage.get_format() == K4A_IMAGE_FORMAT_IR16) {
+                                    cv::Mat image_buffer = cv::Mat(cv::Size(w, h), CV_16UC1,
+                                                                   const_cast<void *>(static_cast<const void *>(inputImage.get_buffer())),
+                                                                   static_cast<size_t>(inputImage.get_stride_bytes()));
+                                    uint64_t timestamp = inputImage.get_system_timestamp().count();
 
-                            } else {
-                                Magnum::Warning{} << "Received infrared frame with unexpected format: "
-                                                  << inputImage.get_format();
-                                break;
+                                    std::ostringstream ss;
+                                    ss << std::setw(10) << std::setfill('0') << frame_counter << "_ir.tiff";
+                                    std::string image_path = Corrade::Utility::Directory::join(m_output_directory, ss.str());
+                                    cv::imwrite(image_path, image_buffer);
+
+                                } else {
+                                    Magnum::Warning{} << "Received infrared frame with unexpected format: "
+                                                      << inputImage.get_format();
+                                    break;
+                                }
                             }
+                        } else {
+                            tsss << ",\n";
                         }
+                    }
+
+                    if (m_export_timestamp) {
+                        Corrade::Utility::Directory::appendString(timestamp_path, tsss.str());
                     }
 
                     if (m_export_pointcloud) {
