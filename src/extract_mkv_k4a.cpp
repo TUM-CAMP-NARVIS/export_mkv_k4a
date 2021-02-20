@@ -415,9 +415,9 @@ namespace Magnum {
 
                             cv::Mat rawData(1, capture.get_color_image().get_size(), CV_8SC1,
                                             const_cast<void *>(static_cast<const void *>(capture.get_color_image().get_buffer())));
-                            cv::Mat image_buffer = cv::imdecode(rawData, -CV_LOAD_IMAGE_COLOR);
+                            cv::Mat image_buffer = cv::imdecode(rawData, -cv::IMREAD_COLOR);
 
-                            cv::cvtColor(image_buffer, result, CV_BGR2BGRA);
+                            cv::cvtColor(image_buffer, result, cv::COLOR_BGR2BGRA);
                             color_image = k4a::image::create_from_buffer(K4A_IMAGE_FORMAT_COLOR_BGRA32,
                                                                          color_image_width_pixels,
                                                                          color_image_height_pixels,

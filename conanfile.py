@@ -22,7 +22,7 @@ class ExportMKVConan(ConanFile):
         "magnum/2020.06@camposs/stable",
         "corrade/2020.06@camposs/stable",
         "kinect-azure-sensor-sdk/1.4.1@camposs/stable",
-#        "bzip2/1.0.6@camposs/stable",
+        "bzip2/1.0.8@conan/stable",
          )
 
     default_options = {
