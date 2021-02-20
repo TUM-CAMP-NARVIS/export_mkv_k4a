@@ -18,11 +18,11 @@ class ExportMKVConan(ConanFile):
     generators = "cmake", "virtualrunenv"
 
     requires = (
-        "opencv/3.4.8@camposs/stable",
-        "magnum/2019.10@camposs/stable",
-        "corrade/2019.10@camposs/stable",
-        "kinect-azure-sensor-sdk/1.3.0@camposs/stable",
-        "bzip2/1.0.6@camposs/stable",
+        "opencv/4.5.0@camposs/stable",
+        "magnum/2020.06@camposs/stable",
+        "corrade/2020.06@camposs/stable",
+        "kinect-azure-sensor-sdk/1.4.1@camposs/stable",
+#        "bzip2/1.0.6@camposs/stable",
          )
 
     default_options = {
