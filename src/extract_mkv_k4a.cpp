@@ -132,6 +132,7 @@ namespace Magnum {
         bool m_export_depth{false};
         bool m_export_infrared{false};
         bool m_export_pointcloud{false};
+        bool m_export_rgbd{false};
 
     };
 
@@ -146,6 +147,7 @@ namespace Magnum {
                 .addBooleanOption("depth").setHelp("depth", "Export Depth stream")
                 .addBooleanOption("infrared").setHelp("infrared", "Export Infrared stream")
                 .addBooleanOption("pointcloud").setHelp("pointcloud", "Export Pointcloud stream")
+                .addBooleanOption("rgbd").setHelp("rgbd", "Export RGBD stream")
                 .addSkippedPrefix("magnum", "engine-specific options");
 
         args.parse(arguments.argc, arguments.argv);
@@ -161,18 +163,19 @@ namespace Magnum {
         m_export_depth = args.isSet("depth");
         m_export_infrared = args.isSet("infrared");
         m_export_pointcloud = args.isSet("pointcloud");
+        m_export_rgbd = args.isSet("rgbd");
     }
 
     int ExtractFramesMKV::exec() {
         Debug{} << "Core profile:" << GL::Context::current().isCoreProfile();
         Debug{} << "Context flags:" << GL::Context::current().flags();
 
-        if (!Corrade::Utility::Directory::fileExists(m_input_filename)) {
+        if (!Corrade::Utility::Directory::exists(m_input_filename)) {
             Magnum::Error{} << "Input file: " << m_input_filename << " not found!";
             return 1;
         }
 
-        if (!Corrade::Utility::Directory::fileExists(m_output_directory)) {
+        if (!Corrade::Utility::Directory::exists(m_output_directory)) {
             Magnum::Error{} << "Output directory: " << m_output_directory << " does not exist!";
             return 1;
         }
@@ -276,22 +279,22 @@ namespace Magnum {
 
                     Magnum::Debug{} << "Extract Frame: " << frame_counter;
 
+                    const k4a::image inputDepthImage = capture.get_depth_image();
                     {
-                        const k4a::image inputImage = capture.get_depth_image();
-                        if (inputImage) {
+                        if (inputDepthImage) {
                             // record depth timestamp
-                            tsss << std::to_string(inputImage.get_device_timestamp().count()) << ",";
-                            tsss << std::to_string(inputImage.get_system_timestamp().count()) << ",";
+                            tsss << std::to_string(inputDepthImage.get_device_timestamp().count()) << ",";
+                            tsss << std::to_string(inputDepthImage.get_system_timestamp().count()) << ",";
 
                             if (m_export_depth) {
-                                int w = inputImage.get_width_pixels();
-                                int h = inputImage.get_height_pixels();
+                                int w = inputDepthImage.get_width_pixels();
+                                int h = inputDepthImage.get_height_pixels();
 
-                                if (inputImage.get_format() == K4A_IMAGE_FORMAT_DEPTH16) {
+                                if (inputDepthImage.get_format() == K4A_IMAGE_FORMAT_DEPTH16) {
                                     cv::Mat image_buffer = cv::Mat(cv::Size(w, h), CV_16UC1,
-                                                                   const_cast<void *>(static_cast<const void *>(inputImage.get_buffer())),
-                                                                   static_cast<size_t>(inputImage.get_stride_bytes()));
-                                    uint64_t timestamp = inputImage.get_system_timestamp().count();
+                                                                   const_cast<void *>(static_cast<const void *>(inputDepthImage.get_buffer())),
+                                                                   static_cast<size_t>(inputDepthImage.get_stride_bytes()));
+                                    uint64_t timestamp = inputDepthImage.get_system_timestamp().count();
 
                                     std::ostringstream ss;
                                     ss << std::setw(10) << std::setfill('0') << frame_counter << "_depth.tiff";
@@ -300,7 +303,7 @@ namespace Magnum {
 
                                 } else {
                                     Magnum::Warning{} << "Received depth frame with unexpected format: "
-                                                      << inputImage.get_format();
+                                                      << inputDepthImage.get_format();
                                     break;
                                 }
                             }
@@ -309,25 +312,25 @@ namespace Magnum {
                         }
                     }
 
+                    const k4a::image inputColorImage = capture.get_color_image();
                     {
-                        const k4a::image inputImage = capture.get_color_image();
-                        if (inputImage) {
+                        if (inputColorImage) {
                             // record color timestamp
-                            tsss << std::to_string(inputImage.get_device_timestamp().count()) << ",";
-                            tsss << std::to_string(inputImage.get_system_timestamp().count()) << ",";
+                            tsss << std::to_string(inputColorImage.get_device_timestamp().count()) << ",";
+                            tsss << std::to_string(inputColorImage.get_system_timestamp().count()) << ",";
 
                             if (m_export_color) {
-                                int w = inputImage.get_width_pixels();
-                                int h = inputImage.get_height_pixels();
+                                int w = inputColorImage.get_width_pixels();
+                                int h = inputColorImage.get_height_pixels();
 
                                 cv::Mat image_buffer;
                                 uint64_t timestamp;
 
-                                if (inputImage.get_format() == K4A_IMAGE_FORMAT_COLOR_BGRA32) {
+                                if (inputColorImage.get_format() == K4A_IMAGE_FORMAT_COLOR_BGRA32) {
                                     image_buffer = cv::Mat(cv::Size(w, h), CV_8UC4,
-                                                           const_cast<void *>(static_cast<const void *>(inputImage.get_buffer())),
+                                                           const_cast<void *>(static_cast<const void *>(inputColorImage.get_buffer())),
                                                            cv::Mat::AUTO_STEP);
-                                    timestamp = inputImage.get_system_timestamp().count();
+                                    timestamp = inputColorImage.get_system_timestamp().count();
 
                                     std::vector<int> compression_params;
                                     compression_params.push_back(cv::IMWRITE_JPEG_QUALITY);
@@ -338,9 +341,9 @@ namespace Magnum {
                                     std::string image_path = Corrade::Utility::Directory::join(m_output_directory, ss.str());
                                     cv::imwrite(image_path, image_buffer, compression_params);
 
-                                } else if (inputImage.get_format() == K4A_IMAGE_FORMAT_COLOR_MJPG) {
+                                } else if (inputColorImage.get_format() == K4A_IMAGE_FORMAT_COLOR_MJPG) {
 
-                                    auto rawData = Corrade::Containers::ArrayView<uint8_t>(const_cast<uint8_t *>(inputImage.get_buffer()), inputImage.get_size());
+                                    auto rawData = Corrade::Containers::ArrayView<uint8_t>(const_cast<uint8_t *>(inputColorImage.get_buffer()), inputColorImage.get_size());
                                     std::ostringstream ss;
                                     ss << std::setw(10) << std::setfill('0') << frame_counter << "_color.jpg";
                                     std::string image_path = Corrade::Utility::Directory::join(m_output_directory, ss.str());
@@ -348,7 +351,7 @@ namespace Magnum {
 
                                 } else {
                                     Magnum::Warning{} << "Received color frame with unexpected format: "
-                                                      << inputImage.get_format();
+                                                      << inputColorImage.get_format();
                                     break;
                                 }
 
@@ -358,22 +361,22 @@ namespace Magnum {
                         }
                     }
 
+                    const k4a::image inputIRImage = capture.get_ir_image();
                     {
-                        const k4a::image inputImage = capture.get_ir_image();
-                        if (inputImage) {
+                        if (inputIRImage) {
                             // record infrared timestamp
-                            tsss << std::to_string(inputImage.get_device_timestamp().count()) << ",";
-                            tsss << std::to_string(inputImage.get_system_timestamp().count()) << "\n";
+                            tsss << std::to_string(inputIRImage.get_device_timestamp().count()) << ",";
+                            tsss << std::to_string(inputIRImage.get_system_timestamp().count()) << "\n";
 
                             if (m_export_infrared) {
-                                int w = inputImage.get_width_pixels();
-                                int h = inputImage.get_height_pixels();
+                                int w = inputIRImage.get_width_pixels();
+                                int h = inputIRImage.get_height_pixels();
 
-                                if (inputImage.get_format() == K4A_IMAGE_FORMAT_IR16) {
+                                if (inputIRImage.get_format() == K4A_IMAGE_FORMAT_IR16) {
                                     cv::Mat image_buffer = cv::Mat(cv::Size(w, h), CV_16UC1,
-                                                                   const_cast<void *>(static_cast<const void *>(inputImage.get_buffer())),
-                                                                   static_cast<size_t>(inputImage.get_stride_bytes()));
-                                    uint64_t timestamp = inputImage.get_system_timestamp().count();
+                                                                   const_cast<void *>(static_cast<const void *>(inputIRImage.get_buffer())),
+                                                                   static_cast<size_t>(inputIRImage.get_stride_bytes()));
+                                    uint64_t timestamp = inputIRImage.get_system_timestamp().count();
 
                                     std::ostringstream ss;
                                     ss << std::setw(10) << std::setfill('0') << frame_counter << "_ir.tiff";
@@ -382,7 +385,7 @@ namespace Magnum {
 
                                 } else {
                                     Magnum::Warning{} << "Received infrared frame with unexpected format: "
-                                                      << inputImage.get_format();
+                                                      << inputIRImage.get_format();
                                     break;
                                 }
                             }
@@ -395,12 +398,47 @@ namespace Magnum {
                         Corrade::Utility::Directory::appendString(timestamp_path, tsss.str());
                     }
 
+                    int color_image_width_pixels = k4a_image_get_width_pixels(inputColorImage.handle());
+                    int color_image_height_pixels = k4a_image_get_height_pixels(inputColorImage.handle());
+
+                    if (m_export_rgbd) {
+                        if (!(inputColorImage && inputDepthImage)) {
+                            Magnum::Warning{} << "Export RGBD requires depth and color image.";
+                            break;
+                        }
+                        k4a_image_t transformed_depth_image;
+                        if (K4A_RESULT_SUCCEEDED != k4a_image_create(K4A_IMAGE_FORMAT_DEPTH16,
+                                                                     color_image_width_pixels,
+                                                                     color_image_height_pixels,
+                                                                     color_image_width_pixels * (int)sizeof(uint16_t),
+                                                                     &transformed_depth_image))
+                        {
+                            Magnum::Error{} << "Failed to create transformed color image";
+                            break;
+                        }
+                        k4a_transformation_t transformation = k4a_transformation_create(&calibration);
+                        if (K4A_RESULT_SUCCEEDED !=
+                                k4a_transformation_depth_image_to_color_camera(transformation, inputDepthImage.handle(),
+                                                                               transformed_depth_image))
+                        {
+                            Magnum::Error{} << "Failed to compute transformed depth image";
+                            break;
+                        }
+                        cv::Mat image_buffer = cv::Mat(cv::Size(color_image_width_pixels, color_image_height_pixels), CV_16UC1,
+                                                       const_cast<void *>(static_cast<const void *>(k4a_image_get_buffer(transformed_depth_image))),
+                                                       static_cast<size_t>(k4a_image_get_stride_bytes(transformed_depth_image)));
+
+                        std::ostringstream ss;
+                        ss << std::setw(10) << std::setfill('0') << frame_counter << "_rgbd.tiff";
+                        std::string image_path = Corrade::Utility::Directory::join(m_output_directory, ss.str());
+                        cv::imwrite(image_path, image_buffer);
+                        k4a_image_release(transformed_depth_image);
+                    }
+
                     if (m_export_pointcloud) {
 
                         k4a_transformation_t transformation = k4a_transformation_create(&calibration);
                         // transform color image into depth camera geometry
-                        int color_image_width_pixels = k4a_image_get_width_pixels(capture.get_color_image().handle());
-                        int color_image_height_pixels = k4a_image_get_height_pixels(capture.get_color_image().handle());
                         int depth_image_width_pixels = k4a_image_get_width_pixels(capture.get_depth_image().handle());
                         int depth_image_height_pixels = k4a_image_get_height_pixels(capture.get_depth_image().handle());
                         k4a_image_t transformed_color_image = NULL;

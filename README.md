@@ -29,6 +29,7 @@ Arguments:
   --depth                    Export Depth stream
   --infrared                 Export Infrared stream
   --pointcloud               Export Pointcloud stream
+  --rgbd                     Export depth aligned to color
   --magnum-...               engine-specific options
                              (see --magnum-help for details)
 
