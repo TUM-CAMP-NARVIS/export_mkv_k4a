@@ -1,2 +1,5 @@
 cmake-build-release/
 build/
+.python-version
+./data/*
+tmp/

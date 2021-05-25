@@ -51,6 +51,14 @@
 
 namespace Magnum {
 
+    struct MissingDataException : public std::exception
+    {
+      const char * what () const throw ()
+        {
+            return "Failed to acquire data from the k4a_capture";
+        }
+    };
+
     static void print_calibration(k4a_calibration_t& calibration)
     {
         using namespace std;
@@ -117,12 +125,20 @@ namespace Magnum {
 
         int exec() override;
 
+        void save_calibration(k4a_calibration_t);
+
+        void process_depth(k4a::capture, int);
+        void process_color(k4a::capture, int);
+        void process_ir(k4a::capture, int);
+        void process_rgbd(k4a::capture, int, k4a_calibration_t);
+
     private:
         k4a::playback m_dev;
         k4a_record_configuration_t m_dev_config;
         Corrade::Utility::Arguments args;
         std::string m_input_filename;
         std::string m_output_directory;
+        std::ostringstream m_tsss;
 
         size_t m_first_frame{0};
         size_t m_last_frame{0};
@@ -180,7 +196,7 @@ namespace Magnum {
             return 1;
         }
 
-        if (!m_export_timestamp && !m_export_infrared && !m_export_color && !m_export_depth && !m_export_pointcloud) {
+        if (!m_export_timestamp && !m_export_infrared && !m_export_color && !m_export_depth && !m_export_pointcloud && !m_export_rgbd) {
             Magnum::Error{} << "Error: No stream was selected for export!";
             Magnum::Debug{} << args.help();
             return 1;
@@ -194,10 +210,81 @@ namespace Magnum {
         m_dev_config = m_dev.get_record_configuration();
 
         // store calibration
-        auto calibration = m_dev.get_calibration();
+        k4a_calibration_t calibration = m_dev.get_calibration();
 
         print_calibration(calibration);
 
+        save_calibration(calibration);
+
+        std::string timestamp_path = Corrade::Utility::Directory::join(m_output_directory, "timestamp.csv");
+
+        if (m_export_timestamp) {
+            Corrade::Utility::Directory::writeString(timestamp_path, "frameindex,depth_dts,depth_sts,color_dts,color_sts,infrared_dts,infrared_sts\n");
+        }
+
+        // now export frames
+
+        k4a::capture capture;
+        int frame_counter{0};
+
+        for (;;) {
+            try {
+                if (m_dev.get_next_capture(&capture)) {
+
+                    if (frame_counter < m_first_frame) {
+                        frame_counter++;
+                        continue;
+                    }
+                    if (m_last_frame > 0 && frame_counter > m_last_frame) {
+                        break;
+                    }
+
+                    // record frameindex
+                    m_tsss << std::to_string(frame_counter) << ",";
+
+                    Magnum::Debug{} << "Extract Frame: " << frame_counter;
+
+                    try {
+
+                        process_depth(capture, frame_counter);
+
+                        process_color(capture, frame_counter);
+
+                        process_ir(capture, frame_counter);
+
+                        process_rgbd(capture, frame_counter, calibration);
+
+                    } catch (const Magnum::MissingDataException& e) {
+                            Magnum::Error{} << "Error during playback: " << e.what();
+                            continue;
+                    }
+
+                    if (m_export_timestamp) {
+                        Corrade::Utility::Directory::appendString(timestamp_path, m_tsss.str());
+                    }
+
+                    frame_counter++;
+                } else {
+                    Magnum::Debug{} << "End of stream.";
+                    break;
+                }
+            } catch (k4a::error &e) {
+                if (std::string(e.what()) == "Failed to get next capture!") {
+                    Magnum::Debug{} << "Playback stopped";
+                    break;
+                } else {
+                    Magnum::Error{} << "Error during playback: " << e.what();
+                    return 1;
+                }
+            }
+        }
+        m_dev.close();
+        Magnum::Debug{} << "Done.";
+        return 0;
+
+    }
+
+    void ExtractFramesMKV::save_calibration(k4a_calibration_t calibration) {
         // from Kinect SDK ...
 
         // converting the calibration data to OpenCV format
@@ -231,9 +318,7 @@ namespace Magnum {
                                                  intrinsics->param.k5, intrinsics->param.k6};
         cv::Mat color_dist_coeffs = cv::Mat(8, 1, CV_32F, &_color_dist_coeffs[0]);
 
-
         // store configuration in output directory
-
         std::string config_fname = Corrade::Utility::Directory::join(m_output_directory, "camera_calibration.yml");
         cv::FileStorage cfg_fs(config_fname, cv::FileStorage::WRITE);
         cfg_fs << "depth_image_width" << calibration.depth_camera_calibration.resolution_width;
@@ -248,296 +333,255 @@ namespace Magnum {
 
         cfg_fs << "depth2color_translation" << t_vec;
         cfg_fs << "depth2color_rotation" << se3;
+    }
 
+    void ExtractFramesMKV::process_depth(k4a::capture capture, int frame_counter) {
+        const k4a::image inputDepthImage = capture.get_depth_image();
+        if (inputDepthImage) {
+            // record depth timestamp
+            m_tsss << std::to_string(inputDepthImage.get_device_timestamp().count()) << ",";
+            m_tsss << std::to_string(inputDepthImage.get_system_timestamp().count()) << ",";
+            if (m_export_depth) {
 
-        // now export frames
+                int w = inputDepthImage.get_width_pixels();
+                int h = inputDepthImage.get_height_pixels();
 
-        k4a::capture capture;
-        size_t frame_counter{0};
+                if (inputDepthImage.get_format() == K4A_IMAGE_FORMAT_DEPTH16) {
+                    cv::Mat image_buffer = cv::Mat(cv::Size(w, h), CV_16UC1,
+                                                   const_cast<void *>(static_cast<const void *>(inputDepthImage.get_buffer())),
+                                                   static_cast<size_t>(inputDepthImage.get_stride_bytes()));
+                    uint64_t timestamp = inputDepthImage.get_system_timestamp().count();
 
-        std::string timestamp_path = Corrade::Utility::Directory::join(m_output_directory, "timestamp.csv");
+                    std::ostringstream ss;
+                    ss << std::setw(10) << std::setfill('0') << frame_counter << "_depth.tiff";
+                    std::string image_path = Corrade::Utility::Directory::join(m_output_directory, ss.str());
+                    cv::imwrite(image_path, image_buffer);
 
-        if (m_export_timestamp) {
-            Corrade::Utility::Directory::writeString(timestamp_path, "frameindex,depth_dts,depth_sts,color_dts,color_sts,infrared_dts,infrared_sts\n");
-        }
-
-        for (;;) {
-            try {
-                if (m_dev.get_next_capture(&capture)) {
-
-                    if (frame_counter < m_first_frame) {
-                        frame_counter++;
-                        continue;
-                    }
-                    if (m_last_frame > 0 && frame_counter > m_last_frame) {
-                        break;
-                    }
-
-                    std::ostringstream tsss;
-                    // record frameindex
-                    tsss << std::to_string(frame_counter) << ",";
-
-                    Magnum::Debug{} << "Extract Frame: " << frame_counter;
-
-                    const k4a::image inputDepthImage = capture.get_depth_image();
-                    {
-                        if (inputDepthImage) {
-                            // record depth timestamp
-                            tsss << std::to_string(inputDepthImage.get_device_timestamp().count()) << ",";
-                            tsss << std::to_string(inputDepthImage.get_system_timestamp().count()) << ",";
-
-                            if (m_export_depth) {
-                                int w = inputDepthImage.get_width_pixels();
-                                int h = inputDepthImage.get_height_pixels();
-
-                                if (inputDepthImage.get_format() == K4A_IMAGE_FORMAT_DEPTH16) {
-                                    cv::Mat image_buffer = cv::Mat(cv::Size(w, h), CV_16UC1,
-                                                                   const_cast<void *>(static_cast<const void *>(inputDepthImage.get_buffer())),
-                                                                   static_cast<size_t>(inputDepthImage.get_stride_bytes()));
-                                    uint64_t timestamp = inputDepthImage.get_system_timestamp().count();
-
-                                    std::ostringstream ss;
-                                    ss << std::setw(10) << std::setfill('0') << frame_counter << "_depth.tiff";
-                                    std::string image_path = Corrade::Utility::Directory::join(m_output_directory, ss.str());
-                                    cv::imwrite(image_path, image_buffer);
-
-                                } else {
-                                    Magnum::Warning{} << "Received depth frame with unexpected format: "
-                                                      << inputDepthImage.get_format();
-                                    break;
-                                }
-                            }
-                        } else {
-                            tsss << ",,";
-                        }
-                    }
-
-                    const k4a::image inputColorImage = capture.get_color_image();
-                    {
-                        if (inputColorImage) {
-                            // record color timestamp
-                            tsss << std::to_string(inputColorImage.get_device_timestamp().count()) << ",";
-                            tsss << std::to_string(inputColorImage.get_system_timestamp().count()) << ",";
-
-                            if (m_export_color) {
-                                int w = inputColorImage.get_width_pixels();
-                                int h = inputColorImage.get_height_pixels();
-
-                                cv::Mat image_buffer;
-                                uint64_t timestamp;
-
-                                if (inputColorImage.get_format() == K4A_IMAGE_FORMAT_COLOR_BGRA32) {
-                                    image_buffer = cv::Mat(cv::Size(w, h), CV_8UC4,
-                                                           const_cast<void *>(static_cast<const void *>(inputColorImage.get_buffer())),
-                                                           cv::Mat::AUTO_STEP);
-                                    timestamp = inputColorImage.get_system_timestamp().count();
-
-                                    std::vector<int> compression_params;
-                                    compression_params.push_back(cv::IMWRITE_JPEG_QUALITY);
-                                    compression_params.push_back(95);
-
-                                    std::ostringstream ss;
-                                    ss << std::setw(10) << std::setfill('0') << frame_counter << "_color.jpg";
-                                    std::string image_path = Corrade::Utility::Directory::join(m_output_directory, ss.str());
-                                    cv::imwrite(image_path, image_buffer, compression_params);
-
-                                } else if (inputColorImage.get_format() == K4A_IMAGE_FORMAT_COLOR_MJPG) {
-
-                                    auto rawData = Corrade::Containers::ArrayView<uint8_t>(const_cast<uint8_t *>(inputColorImage.get_buffer()), inputColorImage.get_size());
-                                    std::ostringstream ss;
-                                    ss << std::setw(10) << std::setfill('0') << frame_counter << "_color.jpg";
-                                    std::string image_path = Corrade::Utility::Directory::join(m_output_directory, ss.str());
-                                    Corrade::Utility::Directory::write(image_path, rawData);
-
-                                } else {
-                                    Magnum::Warning{} << "Received color frame with unexpected format: "
-                                                      << inputColorImage.get_format();
-                                    break;
-                                }
-
-                            }
-                        } else {
-                            tsss << ",,";
-                        }
-                    }
-
-                    const k4a::image inputIRImage = capture.get_ir_image();
-                    {
-                        if (inputIRImage) {
-                            // record infrared timestamp
-                            tsss << std::to_string(inputIRImage.get_device_timestamp().count()) << ",";
-                            tsss << std::to_string(inputIRImage.get_system_timestamp().count()) << "\n";
-
-                            if (m_export_infrared) {
-                                int w = inputIRImage.get_width_pixels();
-                                int h = inputIRImage.get_height_pixels();
-
-                                if (inputIRImage.get_format() == K4A_IMAGE_FORMAT_IR16) {
-                                    cv::Mat image_buffer = cv::Mat(cv::Size(w, h), CV_16UC1,
-                                                                   const_cast<void *>(static_cast<const void *>(inputIRImage.get_buffer())),
-                                                                   static_cast<size_t>(inputIRImage.get_stride_bytes()));
-                                    uint64_t timestamp = inputIRImage.get_system_timestamp().count();
-
-                                    std::ostringstream ss;
-                                    ss << std::setw(10) << std::setfill('0') << frame_counter << "_ir.tiff";
-                                    std::string image_path = Corrade::Utility::Directory::join(m_output_directory, ss.str());
-                                    cv::imwrite(image_path, image_buffer);
-
-                                } else {
-                                    Magnum::Warning{} << "Received infrared frame with unexpected format: "
-                                                      << inputIRImage.get_format();
-                                    break;
-                                }
-                            }
-                        } else {
-                            tsss << ",\n";
-                        }
-                    }
-
-                    if (m_export_timestamp) {
-                        Corrade::Utility::Directory::appendString(timestamp_path, tsss.str());
-                    }
-
-                    int color_image_width_pixels = k4a_image_get_width_pixels(inputColorImage.handle());
-                    int color_image_height_pixels = k4a_image_get_height_pixels(inputColorImage.handle());
-
-                    if (m_export_rgbd) {
-                        if (!(inputColorImage && inputDepthImage)) {
-                            Magnum::Warning{} << "Export RGBD requires depth and color image.";
-                            break;
-                        }
-                        k4a_image_t transformed_depth_image;
-                        if (K4A_RESULT_SUCCEEDED != k4a_image_create(K4A_IMAGE_FORMAT_DEPTH16,
-                                                                     color_image_width_pixels,
-                                                                     color_image_height_pixels,
-                                                                     color_image_width_pixels * (int)sizeof(uint16_t),
-                                                                     &transformed_depth_image))
-                        {
-                            Magnum::Error{} << "Failed to create transformed color image";
-                            break;
-                        }
-                        k4a_transformation_t transformation = k4a_transformation_create(&calibration);
-                        if (K4A_RESULT_SUCCEEDED !=
-                                k4a_transformation_depth_image_to_color_camera(transformation, inputDepthImage.handle(),
-                                                                               transformed_depth_image))
-                        {
-                            Magnum::Error{} << "Failed to compute transformed depth image";
-                            break;
-                        }
-                        cv::Mat image_buffer = cv::Mat(cv::Size(color_image_width_pixels, color_image_height_pixels), CV_16UC1,
-                                                       const_cast<void *>(static_cast<const void *>(k4a_image_get_buffer(transformed_depth_image))),
-                                                       static_cast<size_t>(k4a_image_get_stride_bytes(transformed_depth_image)));
-
-                        std::ostringstream ss;
-                        ss << std::setw(10) << std::setfill('0') << frame_counter << "_rgbd.tiff";
-                        std::string image_path = Corrade::Utility::Directory::join(m_output_directory, ss.str());
-                        cv::imwrite(image_path, image_buffer);
-                        k4a_image_release(transformed_depth_image);
-                    }
-
-                    if (m_export_pointcloud) {
-
-                        k4a_transformation_t transformation = k4a_transformation_create(&calibration);
-                        // transform color image into depth camera geometry
-                        int depth_image_width_pixels = k4a_image_get_width_pixels(capture.get_depth_image().handle());
-                        int depth_image_height_pixels = k4a_image_get_height_pixels(capture.get_depth_image().handle());
-                        k4a_image_t transformed_color_image = NULL;
-                        k4a::image color_image;
-                        cv::Mat result;
-
-
-                        if (capture.get_color_image().get_format() == K4A_IMAGE_FORMAT_COLOR_BGRA32) {
-                            color_image = capture.get_color_image();
-
-                        } else if (capture.get_color_image().get_format() == K4A_IMAGE_FORMAT_COLOR_MJPG) {
-
-                            cv::Mat rawData(1, capture.get_color_image().get_size(), CV_8SC1,
-                                            const_cast<void *>(static_cast<const void *>(capture.get_color_image().get_buffer())));
-                            cv::Mat image_buffer = cv::imdecode(rawData, -cv::IMREAD_COLOR);
-
-                            cv::cvtColor(image_buffer, result, cv::COLOR_BGR2BGRA);
-                            color_image = k4a::image::create_from_buffer(K4A_IMAGE_FORMAT_COLOR_BGRA32,
-                                                                         color_image_width_pixels,
-                                                                         color_image_height_pixels,
-                                                                         color_image_width_pixels * 4 * (int)sizeof(unsigned char),
-                                                                         result.data, result.total() * result.elemSize(), NULL, NULL);
-
-                        } else {
-                            Magnum::Warning{} << "Received color frame with unexpected format: "
-                                              << capture.get_color_image().get_format();
-                            break;
-                        }
-
-
-
-                        if (K4A_RESULT_SUCCEEDED != k4a_image_create(K4A_IMAGE_FORMAT_COLOR_BGRA32,
-                                                                     depth_image_width_pixels,
-                                                                     depth_image_height_pixels,
-                                                                     depth_image_width_pixels * 4 * (int)sizeof(uint8_t),
-                                                                     &transformed_color_image))
-                        {
-                            Magnum::Error{} << "Failed to create transformed color image";
-                            break;
-                        }
-
-                        k4a_image_t point_cloud_image = NULL;
-                        if (K4A_RESULT_SUCCEEDED != k4a_image_create(K4A_IMAGE_FORMAT_CUSTOM,
-                                                                     depth_image_width_pixels,
-                                                                     depth_image_height_pixels,
-                                                                     depth_image_width_pixels * 3 * (int)sizeof(int16_t),
-                                                                     &point_cloud_image))
-                        {
-                            Magnum::Error{} << "Failed to create point cloud image";
-                            break;
-                        }
-
-                        if (K4A_RESULT_SUCCEEDED !=
-                                k4a_transformation_color_image_to_depth_camera(transformation, capture.get_depth_image().handle(), color_image.handle(), transformed_color_image))
-                        {
-                            Magnum::Error{} << "Failed to compute transformed color image";
-                            break;
-                        }
-
-                        if (K4A_RESULT_SUCCEEDED != k4a_transformation_depth_image_to_point_cloud(transformation,
-                                                                                                  capture.get_depth_image().handle(),
-                                                                                                  K4A_CALIBRATION_TYPE_DEPTH,
-                                                                                                  point_cloud_image))
-                        {
-                            Magnum::Error{} << "Failed to compute point cloud";
-                            break;
-                        }
-
-                        std::ostringstream ss;
-                        ss << std::setw(10) << std::setfill('0') << frame_counter << "_pointcloud.ply";
-                        std::string ply_path = Corrade::Utility::Directory::join(m_output_directory, ss.str());
-
-                        tranformation_helpers_write_point_cloud(point_cloud_image, transformed_color_image, ply_path.c_str());
-
-                        k4a_image_release(transformed_color_image);
-                        k4a_image_release(point_cloud_image);
-
-                    }
-
-                    frame_counter++;
                 } else {
-                    Magnum::Debug{} << "End of stream.";
-                    break;
-                }
-            } catch (k4a::error &e) {
-                if (std::string(e.what()) == "Failed to get next capture!") {
-                    Magnum::Debug{} << "Playback stopped";
-                    break;
-                } else {
-                    Magnum::Error{} << "Error during playback: " << e.what();
-                    return 1;
+                    Magnum::Warning{} << "Received depth frame with unexpected format: "
+                                      << inputDepthImage.get_format();
+                    throw MissingDataException();
                 }
             }
+        } else {
+            m_tsss << ",,";
         }
-        m_dev.close();
-        Magnum::Debug{} << "Done.";
-        return 0;
-
     }
+
+    void ExtractFramesMKV::process_color(k4a::capture capture, int frame_counter) {
+        const k4a::image inputColorImage = capture.get_color_image();
+        {
+            if (inputColorImage) {
+                // record color timestamp
+                m_tsss << std::to_string(inputColorImage.get_device_timestamp().count()) << ",";
+                m_tsss << std::to_string(inputColorImage.get_system_timestamp().count()) << ",";
+
+                if (m_export_color) {
+                    int w = inputColorImage.get_width_pixels();
+                    int h = inputColorImage.get_height_pixels();
+
+                    cv::Mat image_buffer;
+                    uint64_t timestamp;
+
+                    if (inputColorImage.get_format() == K4A_IMAGE_FORMAT_COLOR_BGRA32) {
+                        image_buffer = cv::Mat(cv::Size(w, h), CV_8UC4,
+                                               const_cast<void *>(static_cast<const void *>(inputColorImage.get_buffer())),
+                                               cv::Mat::AUTO_STEP);
+                        timestamp = inputColorImage.get_system_timestamp().count();
+
+                        std::vector<int> compression_params;
+                        compression_params.push_back(cv::IMWRITE_JPEG_QUALITY);
+                        compression_params.push_back(95);
+
+                        std::ostringstream ss;
+                        ss << std::setw(10) << std::setfill('0') << frame_counter << "_color.jpg";
+                        std::string image_path = Corrade::Utility::Directory::join(m_output_directory, ss.str());
+                        cv::imwrite(image_path, image_buffer, compression_params);
+
+                    } else if (inputColorImage.get_format() == K4A_IMAGE_FORMAT_COLOR_MJPG) {
+
+                        auto rawData = Corrade::Containers::ArrayView<uint8_t>(const_cast<uint8_t *>(inputColorImage.get_buffer()), inputColorImage.get_size());
+                        std::ostringstream ss;
+                        ss << std::setw(10) << std::setfill('0') << frame_counter << "_color.jpg";
+                        std::string image_path = Corrade::Utility::Directory::join(m_output_directory, ss.str());
+                        Corrade::Utility::Directory::write(image_path, rawData);
+
+                    } else {
+                        Magnum::Warning{} << "Received color frame with unexpected format: "
+                                          << inputColorImage.get_format();
+                        throw MissingDataException();
+                    }
+
+                }
+            } else {
+                m_tsss << ",,";
+            }
+        }
+    }
+    void ExtractFramesMKV::process_ir(k4a::capture capture, int frame_counter) {
+        const k4a::image inputIRImage = capture.get_ir_image();
+        {
+            if (inputIRImage) {
+                // record infrared timestamp
+                m_tsss << std::to_string(inputIRImage.get_device_timestamp().count()) << ",";
+                m_tsss << std::to_string(inputIRImage.get_system_timestamp().count()) << "\n";
+
+                if (m_export_infrared) {
+                    int w = inputIRImage.get_width_pixels();
+                    int h = inputIRImage.get_height_pixels();
+
+                    if (inputIRImage.get_format() == K4A_IMAGE_FORMAT_IR16) {
+                        cv::Mat image_buffer = cv::Mat(cv::Size(w, h), CV_16UC1,
+                                                       const_cast<void *>(static_cast<const void *>(inputIRImage.get_buffer())),
+                                                       static_cast<size_t>(inputIRImage.get_stride_bytes()));
+                        uint64_t timestamp = inputIRImage.get_system_timestamp().count();
+
+                        std::ostringstream ss;
+                        ss << std::setw(10) << std::setfill('0') << frame_counter << "_ir.tiff";
+                        std::string image_path = Corrade::Utility::Directory::join(m_output_directory, ss.str());
+                        cv::imwrite(image_path, image_buffer);
+
+                    } else {
+                        Magnum::Warning{} << "Received infrared frame with unexpected format: "
+                                          << inputIRImage.get_format();
+                        throw MissingDataException();
+                    }
+                }
+            } else {
+                m_tsss << ",\n";
+            }
+        }
+    }
+
+    void ExtractFramesMKV::process_rgbd(k4a::capture capture, int frame_counter, k4a_calibration_t calibration) {
+
+        const k4a::image inputDepthImage = capture.get_depth_image();
+        const k4a::image inputColorImage = capture.get_color_image();
+
+        int color_image_width_pixels = k4a_image_get_width_pixels(inputColorImage.handle());
+        int color_image_height_pixels = k4a_image_get_height_pixels(inputColorImage.handle());
+
+        if (m_export_rgbd) {
+            if (!(inputColorImage && inputDepthImage)) {
+                Magnum::Warning{} << "Export RGBD requires depth and color image.";
+                throw MissingDataException();
+            }
+            k4a_image_t transformed_depth_image;
+            if (K4A_RESULT_SUCCEEDED != k4a_image_create(K4A_IMAGE_FORMAT_DEPTH16,
+                                                         color_image_width_pixels,
+                                                         color_image_height_pixels,
+                                                         color_image_width_pixels * (int)sizeof(uint16_t),
+                                                         &transformed_depth_image))
+            {
+                Magnum::Error{} << "Failed to create transformed color image";
+                throw MissingDataException();
+            }
+
+            k4a_transformation_t transformation = k4a_transformation_create(&calibration);
+            if (K4A_RESULT_SUCCEEDED !=
+                    k4a_transformation_depth_image_to_color_camera(transformation, inputDepthImage.handle(),
+                                                                   transformed_depth_image))
+            {
+                Magnum::Error{} << "Failed to compute transformed depth image";
+                throw MissingDataException();
+            }
+            std::ostringstream ss;
+            ss << std::setw(10) << std::setfill('0') << frame_counter << "_rgbd.tiff";
+            std::string image_path = Corrade::Utility::Directory::join(m_output_directory, ss.str());
+            cv::Mat image_buffer = cv::Mat(cv::Size(color_image_width_pixels, color_image_height_pixels), CV_16UC1,
+                                           const_cast<void *>(static_cast<const void *>(k4a_image_get_buffer(transformed_depth_image))),
+                                           static_cast<size_t>(k4a_image_get_stride_bytes(transformed_depth_image)));
+
+            cv::imwrite(image_path, image_buffer);
+            k4a_image_release(transformed_depth_image);
+            k4a_transformation_destroy(transformation);
+        }
+    }
+//
+//                    if (m_export_pointcloud) {
+//
+//                        k4a_transformation_t transformation = k4a_transformation_create(&calibration);
+//                        // transform color image into depth camera geometry
+//                        int depth_image_width_pixels = k4a_image_get_width_pixels(capture.get_depth_image().handle());
+//                        int depth_image_height_pixels = k4a_image_get_height_pixels(capture.get_depth_image().handle());
+//                        k4a_image_t transformed_color_image = NULL;
+//                        k4a::image color_image;
+//                        cv::Mat result;
+//
+//
+//                        if (capture.get_color_image().get_format() == K4A_IMAGE_FORMAT_COLOR_BGRA32) {
+//                            color_image = capture.get_color_image();
+//
+//                        } else if (capture.get_color_image().get_format() == K4A_IMAGE_FORMAT_COLOR_MJPG) {
+//
+//                            cv::Mat rawData(1, capture.get_color_image().get_size(), CV_8SC1,
+//                                            const_cast<void *>(static_cast<const void *>(capture.get_color_image().get_buffer())));
+//                            cv::Mat image_buffer = cv::imdecode(rawData, -cv::IMREAD_COLOR);
+//
+//                            cv::cvtColor(image_buffer, result, cv::COLOR_BGR2BGRA);
+//                            color_image = k4a::image::create_from_buffer(K4A_IMAGE_FORMAT_COLOR_BGRA32,
+//                                                                         color_image_width_pixels,
+//                                                                         color_image_height_pixels,
+//                                                                         color_image_width_pixels * 4 * (int)sizeof(unsigned char),
+//                                                                         result.data, result.total() * result.elemSize(), NULL, NULL);
+//
+//                        } else {
+//                            Magnum::Warning{} << "Received color frame with unexpected format: "
+//                                              << capture.get_color_image().get_format();
+//                            break;
+//                        }
+//
+//
+//
+//                        if (K4A_RESULT_SUCCEEDED != k4a_image_create(K4A_IMAGE_FORMAT_COLOR_BGRA32,
+//                                                                     depth_image_width_pixels,
+//                                                                     depth_image_height_pixels,
+//                                                                     depth_image_width_pixels * 4 * (int)sizeof(uint8_t),
+//                                                                     &transformed_color_image))
+//                        {
+//                            Magnum::Error{} << "Failed to create transformed color image";
+//                            break;
+//                        }
+//
+//                        k4a_image_t point_cloud_image = NULL;
+//                        if (K4A_RESULT_SUCCEEDED != k4a_image_create(K4A_IMAGE_FORMAT_CUSTOM,
+//                                                                     depth_image_width_pixels,
+//                                                                     depth_image_height_pixels,
+//                                                                     depth_image_width_pixels * 3 * (int)sizeof(int16_t),
+//                                                                     &point_cloud_image))
+//                        {
+//                            Magnum::Error{} << "Failed to create point cloud image";
+//                            break;
+//                        }
+//
+//                        if (K4A_RESULT_SUCCEEDED !=
+//                                k4a_transformation_color_image_to_depth_camera(transformation, capture.get_depth_image().handle(), color_image.handle(), transformed_color_image))
+//                        {
+//                            Magnum::Error{} << "Failed to compute transformed color image";
+//                            break;
+//                        }
+//
+//                        if (K4A_RESULT_SUCCEEDED != k4a_transformation_depth_image_to_point_cloud(transformation,
+//                                                                                                  capture.get_depth_image().handle(),
+//                                                                                                  K4A_CALIBRATION_TYPE_DEPTH,
+//                                                                                                  point_cloud_image))
+//                        {
+//                            Magnum::Error{} << "Failed to compute point cloud";
+//                            break;
+//                        }
+//
+//                        std::ostringstream ss;
+//                        ss << std::setw(10) << std::setfill('0') << frame_counter << "_pointcloud.ply";
+//                        std::string ply_path = Corrade::Utility::Directory::join(m_output_directory, ss.str());
+//
+//                        tranformation_helpers_write_point_cloud(point_cloud_image, transformed_color_image, ply_path.c_str());
+//
+//                        k4a_image_release(transformed_color_image);
+//                        k4a_image_release(point_cloud_image);
+//
+//                    }
+//
+//    }
 
 }
 
